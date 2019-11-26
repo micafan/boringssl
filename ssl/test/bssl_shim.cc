@@ -39,7 +39,6 @@ OPENSSL_MSVC_PRAGMA(comment(lib, "Ws2_32.lib"))
 
 #include <openssl/aead.h>
 #include <openssl/bio.h>
-#include <openssl/buf.h>
 #include <openssl/bytestring.h>
 #include <openssl/cipher.h>
 #include <openssl/crypto.h>
@@ -204,7 +203,7 @@ static int DoRead(SSL *ssl, uint8_t *out, size_t max_out) {
         return -1;
       }
     }
-  } while (config->async && RetryAsync(ssl, ret));
+  } while (RetryAsync(ssl, ret));
 
   if (config->peek_then_read && ret > 0) {
     std::unique_ptr<uint8_t[]> buf(new uint8_t[static_cast<size_t>(ret)]);
@@ -233,7 +232,6 @@ static int DoRead(SSL *ssl, uint8_t *out, size_t max_out) {
 // operations. It returns the result of the final |SSL_write| call.
 static int WriteAll(SSL *ssl, const void *in_, size_t in_len) {
   const uint8_t *in = reinterpret_cast<const uint8_t *>(in_);
-  const TestConfig *config = GetTestConfig(ssl);
   int ret;
   do {
     ret = SSL_write(ssl, in, in_len);
@@ -241,29 +239,27 @@ static int WriteAll(SSL *ssl, const void *in_, size_t in_len) {
       in += ret;
       in_len -= ret;
     }
-  } while ((config->async && RetryAsync(ssl, ret)) || (ret > 0 && in_len > 0));
+  } while (RetryAsync(ssl, ret) || (ret > 0 && in_len > 0));
   return ret;
 }
 
 // DoShutdown calls |SSL_shutdown|, resolving any asynchronous operations. It
 // returns the result of the final |SSL_shutdown| call.
 static int DoShutdown(SSL *ssl) {
-  const TestConfig *config = GetTestConfig(ssl);
   int ret;
   do {
     ret = SSL_shutdown(ssl);
-  } while (config->async && RetryAsync(ssl, ret));
+  } while (RetryAsync(ssl, ret));
   return ret;
 }
 
 // DoSendFatalAlert calls |SSL_send_fatal_alert|, resolving any asynchronous
 // operations. It returns the result of the final |SSL_send_fatal_alert| call.
 static int DoSendFatalAlert(SSL *ssl, uint8_t alert) {
-  const TestConfig *config = GetTestConfig(ssl);
   int ret;
   do {
     ret = SSL_send_fatal_alert(ssl, alert);
-  } while (config->async && RetryAsync(ssl, ret));
+  } while (RetryAsync(ssl, ret));
   return ret;
 }
 
@@ -672,6 +668,20 @@ static bool CheckHandshakeProperties(SSL *ssl, bool is_resume,
             SSL_delegated_credential_used(ssl) ? "" : "no");
     return false;
   }
+
+  if (config->expect_pq_experiment_signal !=
+      !!SSL_pq_experiment_signal_seen(ssl)) {
+    fprintf(stderr, "Got %sPQ experiment signal, but wanted opposite. \n",
+            SSL_pq_experiment_signal_seen(ssl) ? "" : "no ");
+    return false;
+  }
+
+  if ((config->expect_hrr && !SSL_used_hello_retry_request(ssl)) ||
+      (config->expect_no_hrr && SSL_used_hello_retry_request(ssl))) {
+    fprintf(stderr, "Got %sHRR, but wanted opposite.\n",
+            SSL_used_hello_retry_request(ssl) ? "" : "no ");
+    return false;
+  }
   return true;
 }
 
@@ -825,7 +835,7 @@ static bool DoExchange(bssl::UniquePtr<SSL_SESSION> *out_session,
       ret = CheckIdempotentError("SSL_do_handshake", ssl, [&]() -> int {
         return SSL_do_handshake(ssl);
       });
-    } while (config->async && RetryAsync(ssl, ret));
+    } while (RetryAsync(ssl, ret));
 
     if (config->forbid_renegotiation_after_handshake) {
       SSL_set_renegotiate_mode(ssl, ssl_renegotiate_never);
@@ -846,7 +856,7 @@ static bool DoExchange(bssl::UniquePtr<SSL_SESSION> *out_session,
     if (config->handshake_twice) {
       do {
         ret = SSL_do_handshake(ssl);
-      } while (config->async && RetryAsync(ssl, ret));
+      } while (RetryAsync(ssl, ret));
       if (ret != 1) {
         return false;
       }
@@ -862,22 +872,6 @@ static bool DoExchange(bssl::UniquePtr<SSL_SESSION> *out_session,
     // Reset the state to assert later that the callback isn't called in
     // renegotations.
     GetTestState(ssl)->got_new_session = false;
-  }
-
-  if (config->export_early_keying_material > 0) {
-    std::vector<uint8_t> result(
-        static_cast<size_t>(config->export_early_keying_material));
-    if (!SSL_export_early_keying_material(
-            ssl, result.data(), result.size(), config->export_label.data(),
-            config->export_label.size(),
-            reinterpret_cast<const uint8_t *>(config->export_context.data()),
-            config->export_context.size())) {
-      fprintf(stderr, "failed to export keying material\n");
-      return false;
-    }
-    if (WriteAll(ssl, result.data(), result.size()) < 0) {
-      return false;
-    }
   }
 
   if (config->export_keying_material > 0) {
@@ -1134,6 +1128,15 @@ static bool DoExchange(bssl::UniquePtr<SSL_SESSION> *out_session,
   if (SSL_total_renegotiations(ssl) != config->expect_total_renegotiations) {
     fprintf(stderr, "Expected %d renegotiations, got %d\n",
             config->expect_total_renegotiations, SSL_total_renegotiations(ssl));
+    return false;
+  }
+
+  if (config->renegotiate_explicit &&
+      SSL_total_renegotiations(ssl) !=
+          GetTestState(ssl)->explicit_renegotiates) {
+    fprintf(stderr, "Performed %d renegotiations, but triggered %d of them\n",
+            SSL_total_renegotiations(ssl),
+            GetTestState(ssl)->explicit_renegotiates);
     return false;
   }
 

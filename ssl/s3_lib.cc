@@ -151,7 +151,6 @@
 #include <assert.h>
 #include <string.h>
 
-#include <openssl/buf.h>
 #include <openssl/digest.h>
 #include <openssl/err.h>
 #include <openssl/md5.h>
@@ -179,7 +178,11 @@ SSL3_STATE::SSL3_STATE()
       wpend_pending(false),
       early_data_accepted(false),
       tls13_downgrade(false),
-      token_binding_negotiated(false) {}
+      token_binding_negotiated(false),
+      pq_experiment_signal_seen(false),
+      alert_dispatch(false),
+      renegotiate_pending(false),
+      used_hello_retry_request(false) {}
 
 SSL3_STATE::~SSL3_STATE() {}
 
